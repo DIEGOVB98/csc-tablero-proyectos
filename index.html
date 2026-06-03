@@ -574,7 +574,7 @@ projects.forEach(p=>{const ids=tasks.filter(t=>t.proj===p.id).map(t=>parseInt(t.
 
 let curUser=null,editId=null,fPrio='all',fStat='all',fPrj='all',cYear=2026,cMonth=5,curView='board',dragId=null,ganttZoom='weeks',selIds=new Set();
 
-const SUPABASE_URL = 'https://ciixyfljobtgqrcuhvcg.supabase.co/rest/v1/';
+const SUPABASE_URL = 'https://ciixyfljobtgqrcuhvcg.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_BHjj-1IDeVY1eaj0-nTyYg_NxuYyY3t';
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
