@@ -512,6 +512,8 @@ body{font-family:var(--sans);background:var(--bg);color:var(--t);font-size:14px;
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
 <script>
 const AVC={s:{bg:'#E1F5EE',fg:'#0F6E56'},d:{bg:'#EEF2FF',fg:'#3730A3'},f:{bg:'#F3E8FF',fg:'#6D28D9'},p:{bg:'#FFF7ED',fg:'#C2410C'},g:{bg:'#F0FDF4',fg:'#15803D'},c:{bg:'#FFF1F2',fg:'#BE123C'},l:{bg:'#F3F0FF',fg:'#5B21B6'},ce:{bg:'#E0F2FE',fg:'#0369A1'},y:{bg:'#FEFCE8',fg:'#854D0E'},t:{bg:'#F0FDFA',fg:'#134E4A'}};
 function avSt(c,w){const s=AVC[c]||AVC.s;w=w||22;return `background:${s.bg};color:${s.fg};width:${w}px;height:${w}px;font-size:${Math.round(w*.4)}px`;}
@@ -572,6 +574,216 @@ projects.forEach(p=>{const ids=tasks.filter(t=>t.proj===p.id).map(t=>parseInt(t.
 
 let curUser=null,editId=null,fPrio='all',fStat='all',fPrj='all',cYear=2026,cMonth=5,curView='board',dragId=null,ganttZoom='weeks',selIds=new Set();
 
+const SUPABASE_URL = 'https://ciixyfljobtgqrcuhvcg.supabase.co/rest/v1/';
+const SUPABASE_KEY = 'sb_publishable_BHjj-1IDeVY1eaj0-nTyYg_NxuYyY3t';
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+function dateOnly(v){
+  return v ? String(v).slice(0,10) : '';
+}
+
+function recalcularNextN(){
+  Object.keys(nextN).forEach(k => delete nextN[k]);
+  projects.forEach(p => {
+    const ids = tasks
+      .filter(t => t.proj === p.id)
+      .map(t => parseInt(String(t.id).split('-')[1]) || 0);
+    nextN[p.id] = Math.max(0, ...ids) + 1;
+  });
+}
+
+async function cargarDatosSupabase(){
+  const [uRes, pRes, tRes, rRes] = await Promise.all([
+    db.from('usuarios').select('*').eq('activo', true).order('nombre'),
+    db.from('proyectos').select('*').eq('activo', true).order('nombre'),
+    db.from('tareas').select('*').order('id'),
+    db.from('tarea_responsables').select('*')
+  ]);
+
+  if(uRes.error) throw uRes.error;
+  if(pRes.error) throw pRes.error;
+  if(tRes.error) throw tRes.error;
+  if(rRes.error) throw rRes.error;
+
+  const respMap = {};
+  (rRes.data || []).forEach(r => {
+    if(!respMap[r.tarea_id]) respMap[r.tarea_id] = [];
+    respMap[r.tarea_id].push(r.usuario_iniciales);
+  });
+
+  users = (uRes.data || []).map(u => ({
+    init: u.iniciales,
+    name: u.nombre,
+    color: u.color || 'd'
+  }));
+
+  projects = (pRes.data || []).map(p => ({
+    id: p.id,
+    label: p.nombre,
+    sigla: p.sigla,
+    bg: p.bg,
+    fg: p.fg
+  }));
+
+  tasks = (tRes.data || []).map(t => ({
+    id: t.id,
+    proj: t.proyecto_id,
+    title: t.titulo,
+    status: t.estado,
+    priority: t.prioridad,
+    resp: respMap[t.id] || [],
+    pct: t.porcentaje || 0,
+    start: dateOnly(t.fecha_inicio),
+    date: dateOnly(t.fecha_limite),
+    desc: t.descripcion || '',
+    notes: t.notas || '',
+    by: t.actualizado_por || t.creado_por || '—',
+    upd: dateOnly(t.actualizado_en)
+  }));
+
+  const oldInit = curUser ? curUser.init : null;
+  if(oldInit){
+    curUser = users.find(u => u.init === oldInit) || curUser;
+  }
+
+  recalcularNextN();
+}
+
+async function refrescarUIDesdeSupabase(){
+  try{
+    await cargarDatosSupabase();
+    buildSidebar();
+    buildProjSelects();
+    buildRespLists();
+    buildAFPanel();
+    renderUCards();
+
+    if(curUser){
+      const av = document.getElementById('suAv');
+      av.className = 'av';
+      av.style.cssText = avSt(curUser.color,28);
+      av.textContent = curUser.init;
+      document.getElementById('suName').textContent = curUser.name;
+      document.getElementById('curUserBadge').textContent = 'Usuario: ' + curUser.name;
+    }
+
+    if(document.getElementById('app').style.display === 'flex'){
+      renderView(curView);
+    }
+  }catch(err){
+    console.error('Error al sincronizar con Supabase:', err);
+  }
+}
+
+async function guardarTareaEnSupabase(t, accion='actualizar'){
+  const usuario = curUser ? curUser.init : null;
+
+  const payload = {
+    id: t.id,
+    proyecto_id: t.proj,
+    titulo: t.title,
+    estado: t.status,
+    prioridad: t.priority,
+    porcentaje: t.pct || 0,
+    fecha_inicio: t.start || null,
+    fecha_limite: t.date || null,
+    descripcion: t.desc || '',
+    notas: t.notes || '',
+    creado_por: t.by && t.by !== '—' ? t.by : usuario,
+    actualizado_por: usuario,
+    actualizado_en: new Date().toISOString()
+  };
+
+  const { error } = await db
+    .from('tareas')
+    .upsert(payload, { onConflict: 'id' });
+
+  if(error){
+    console.error(error);
+    alert('No se pudo guardar la tarea en Supabase.');
+    return false;
+  }
+
+  const { error: delError } = await db
+    .from('tarea_responsables')
+    .delete()
+    .eq('tarea_id', t.id);
+
+  if(delError){
+    console.error(delError);
+    alert('La tarea se guardó, pero hubo un problema actualizando responsables.');
+    return false;
+  }
+
+  const responsables = (Array.isArray(t.resp) ? t.resp : [t.resp]).filter(Boolean);
+
+  if(responsables.length){
+    const { error: insError } = await db
+      .from('tarea_responsables')
+      .insert(responsables.map(r => ({
+        tarea_id: t.id,
+        usuario_iniciales: r
+      })));
+
+    if(insError){
+      console.error(insError);
+      alert('La tarea se guardó, pero no se pudieron guardar los responsables.');
+      return false;
+    }
+  }
+
+  await db.from('historial_cambios').insert({
+    tarea_id: t.id,
+    usuario_iniciales: usuario,
+    accion: accion,
+    campo: 'tarea',
+    valor_nuevo: t.title
+  });
+
+  return true;
+}
+
+async function eliminarTareaEnSupabase(id){
+  const usuario = curUser ? curUser.init : null;
+
+  await db.from('historial_cambios').insert({
+    tarea_id: id,
+    usuario_iniciales: usuario,
+    accion: 'eliminar',
+    campo: 'tarea',
+    valor_anterior: id
+  });
+
+  const { error } = await db
+    .from('tareas')
+    .delete()
+    .eq('id', id);
+
+  if(error){
+    console.error(error);
+    alert('No se pudo eliminar la tarea en Supabase.');
+    return false;
+  }
+
+  return true;
+}
+
+async function iniciarConSupabase(){
+  try{
+    await cargarDatosSupabase();
+  }catch(err){
+    console.error('No se pudo conectar con Supabase:', err);
+    alert('No se pudo conectar con Supabase. El tablero abrirá con datos locales.');
+  }
+
+  buildSidebar();
+  buildProjSelects();
+  buildColorGrid();
+  renderUCards();
+
+  setInterval(refrescarUIDesdeSupabase, 15000);
+}
+  
 // ── BUILD ──
 function buildSidebar(){
   const el=document.getElementById('sideProjs');el.innerHTML='';
@@ -1023,23 +1235,43 @@ function openPanel(id){
   document.getElementById('panel').classList.add('open');
 }
 function closePanel(){document.getElementById('pov').classList.remove('open');document.getElementById('panel').classList.remove('open');editId=null;}
-function saveTask(){
-  const t=tasks.find(x=>x.id===editId);if(!t)return;
-  t.title=document.getElementById('pntit').value.trim()||t.title;
-  t.desc=document.getElementById('pndesc').value;
-  t.proj=document.getElementById('pnproj').value;
-  t.status=document.getElementById('pnstat').value;
-  t.priority=document.getElementById('pnprio').value;
-  t.start=document.getElementById('pnstart').value;
-  t.date=document.getElementById('pndate').value;
-  t.pct=parseInt(document.getElementById('pnpct').value);
-  t.notes=document.getElementById('pnnotes').value;
-  const checked=[...document.querySelectorAll('#pnRespList input[type=checkbox]:checked')].map(cb=>cb.value);
-  if(checked.length)t.resp=checked;
-  t.upd=now();if(curUser)t.by=curUser.init;
-  closePanel();renderView(curView);
+async function saveTask(){
+  const t = tasks.find(x => x.id === editId);
+  if(!t) return;
+
+  t.title = document.getElementById('pntit').value.trim() || t.title;
+  t.desc = document.getElementById('pndesc').value;
+  t.proj = document.getElementById('pnproj').value;
+  t.status = document.getElementById('pnstat').value;
+  t.priority = document.getElementById('pnprio').value;
+  t.start = document.getElementById('pnstart').value;
+  t.date = document.getElementById('pndate').value;
+  t.pct = parseInt(document.getElementById('pnpct').value);
+  t.notes = document.getElementById('pnnotes').value;
+
+  const checked = [...document.querySelectorAll('#pnRespList input[type=checkbox]:checked')].map(cb => cb.value);
+  if(checked.length) t.resp = checked;
+
+  t.upd = now();
+  if(curUser) t.by = curUser.init;
+
+  const ok = await guardarTareaEnSupabase(t, 'actualizar');
+  if(!ok) return;
+
+  closePanel();
+  renderView(curView);
 }
-function deleteTask(){if(!confirm('¿Eliminar esta tarea?'))return;tasks=tasks.filter(x=>x.id!==editId);closePanel();renderView(curView);}
+async function deleteTask(){
+  if(!confirm('¿Eliminar esta tarea?')) return;
+
+  const id = editId;
+  const ok = await eliminarTareaEnSupabase(id);
+  if(!ok) return;
+
+  tasks = tasks.filter(x => x.id !== id);
+  closePanel();
+  renderView(curView);
+}
 
 // ── CREATE ──
 function openCreate(st){
@@ -1053,15 +1285,43 @@ function openCreate(st){
   document.getElementById('moverlay').classList.add('open');
 }
 function closeCM(e){if(e.target===document.getElementById('moverlay'))document.getElementById('moverlay').classList.remove('open');}
-function doCreate(){
-  const title=document.getElementById('mtit').value.trim();if(!title){alert('Ingresa un título');return;}
-  const proj=document.getElementById('mproj').value;
-  const checked=[...document.querySelectorAll('#mRespList input[type=checkbox]:checked')].map(cb=>cb.value);
-  const resp=checked.length?checked:(curUser?[curUser.init]:['SO']);
-  if(!nextN[proj])nextN[proj]=1;
-  const id=proj.toUpperCase().replace(/[^A-Z0-9]/g,'')+'-'+String(nextN[proj]++).padStart(2,'0');
-  tasks.push({id,proj,title,status:document.getElementById('mstat').value,priority:document.getElementById('mprio').value,resp,pct:0,start:document.getElementById('mstart').value,date:document.getElementById('mdate').value,desc:document.getElementById('mdesc').value,notes:'',by:curUser?curUser.init:'—',upd:now()});
-  document.getElementById('moverlay').classList.remove('open');renderView(curView);
+async function doCreate(){
+  const title = document.getElementById('mtit').value.trim();
+  if(!title){
+    alert('Ingresa un título');
+    return;
+  }
+
+  const proj = document.getElementById('mproj').value;
+  const checked = [...document.querySelectorAll('#mRespList input[type=checkbox]:checked')].map(cb => cb.value);
+  const resp = checked.length ? checked : (curUser ? [curUser.init] : ['SO']);
+
+  if(!nextN[proj]) nextN[proj] = 1;
+
+  const id = proj.toUpperCase().replace(/[^A-Z0-9]/g,'') + '-' + String(nextN[proj]++).padStart(2,'0');
+
+  const nuevaTarea = {
+    id,
+    proj,
+    title,
+    status: document.getElementById('mstat').value,
+    priority: document.getElementById('mprio').value,
+    resp,
+    pct: 0,
+    start: document.getElementById('mstart').value,
+    date: document.getElementById('mdate').value,
+    desc: document.getElementById('mdesc').value,
+    notes: '',
+    by: curUser ? curUser.init : '—',
+    upd: now()
+  };
+
+  const ok = await guardarTareaEnSupabase(nuevaTarea, 'crear');
+  if(!ok) return;
+
+  tasks.push(nuevaTarea);
+  document.getElementById('moverlay').classList.remove('open');
+  renderView(curView);
 }
 
 function now(){return new Date().toISOString().slice(0,10);}
@@ -1139,7 +1399,7 @@ function renderAvGroupSidebar(){
 
 
 // ── INIT ──
-buildSidebar();buildProjSelects();buildColorGrid();renderUCards();
+iniciarConSupabase();
 </script>
 
 <!-- MODAL GESTIONAR USUARIOS -->
